@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-# Twist를 발행하여 로봇이 구동되는 코드
-
 import time, math, serial, struct, threading
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
-from dynamixel_sdk import PortHandler, PacketHandler
-
 
 # ------------------------------
 # In-Wheel Motor Controller (원본과 동일 포맷/포트/ID)
@@ -16,13 +12,13 @@ from dynamixel_sdk import PortHandler, PacketHandler
 class InWheelMotorController:
     """
     포트/ID 매핑:
-      FR: port=/dev/ttyACM1, id=3
-      FL: port=/dev/ttyACM2, id=4
-      RR: port=/dev/ttyACM3, id=2
-      RL: port=/dev/ttyACM4, id=1
+      FR: port=/dev/ttyACM0, id=3
+      FL: port=/dev/ttyACM1, id=4
+      RR: port=/dev/ttyACM2, id=2
+      RL: port=/dev/ttyACM3, id=1
     """
     def __init__(self):
-        self.port_list = ["/dev/ttyACM1","/dev/ttyACM2","/dev/ttyACM3","/dev/ttyACM4"]  # [FR,FL,RR,RL]
+        self.port_list = ["/dev/ttyACM0","/dev/ttyACM1","/dev/ttyACM2","/dev/ttyACM3"]  # [FR,FL,RR,RL]
         self.velocity_ids = (3,4,2,1)
         self.serial_connections = [self.connect_serial(p) for p in self.port_list]
 
@@ -109,30 +105,6 @@ class InWheelMotorController:
             except:
                 pass
 
-
-# ------------------------------
-# Dynamixel 초기화(토크 ON + 정중앙 2048, 이후 미사용)
-# ------------------------------
-class DynamixelInitializer:
-    def __init__(self, port_name='/dev/ttyACM0', baud_rate=1000000, ids=(0,1), init_pos=2048):
-        self.port = PortHandler(port_name)
-        self.packet = PacketHandler(2.0)
-        if not (self.port.openPort() and self.port.setBaudRate(baud_rate)):
-            raise RuntimeError("Dynamixel 포트 연결 실패")
-        for _id in ids:
-            # Torque ON & 중앙 위치
-            self.packet.write1ByteTxRx(self.port, _id, 64, 1)     # Torque On
-            self.packet.write1ByteTxRx(self.port, _id, 11, 3)     # Position Mode
-            self.packet.write4ByteTxRx(self.port, _id, 116, init_pos)
-
-    def shutdown(self):
-        # 요청: 다이나믹셀은 토크 ON 상태로 두고 사용하지 않음 -> 포트만 닫음
-        try:
-            self.port.closePort()
-        except:
-            pass
-
-
 # ------------------------------
 # ROS2 Node: /cmd_vel -> wheel RPM
 # ------------------------------
@@ -143,24 +115,14 @@ class CmdVelToRPMNode(Node):
         self.TRACK = 0.347        # 좌우 바퀴 간격 [m]
         self.WHEEL_RADIUS = 0.05035 # 바퀴 반지름 [m]
 
-        self.declare_parameter('cmd_vel_topic', '/cmd_vel') # 구독 토픽
-        cmd_topic = self.get_parameter('cmd_vel_topic').get_parameter_value().string_value
-
         # 변환 상수
         self.RPM_PER_MPS = 60.0 / (2.0 * math.pi * self.WHEEL_RADIUS)
 
         # 모터 컨트롤러
         self.inwheel = InWheelMotorController()
 
-        # 다이나믹셀: 토크 ON + 2048, 이후 미사용
-        try:
-            self.dxl = DynamixelInitializer(port_name='/dev/ttyACM0', baud_rate=1000000, ids=(0,1), init_pos=2048)
-        except Exception as e:
-            self.get_logger().warn(f"Dynamixel 초기화 실패(무시): {e}")
-            self.dxl = None
-
         # /cmd_vel 구독
-        self.sub = self.create_subscription(Twist, cmd_topic, self.cmdvel_cb, 10)
+        self.sub = self.create_subscription(Twist, 'cmd_vel', self.cmdvel_cb, 10)
 
         # 마지막 명령 유지 타이머(워치독)
         self.last_cmd_time = self.get_clock().now()
@@ -198,8 +160,6 @@ class CmdVelToRPMNode(Node):
             self.inwheel.set_velocity_individual([0,0,0,0])
 
     def shutdown(self):
-        if self.dxl:
-            self.dxl.shutdown()
         self.inwheel.shutdown()
 
 
