@@ -147,14 +147,14 @@ class FirstCourseController(Node):
 
         self.timer = self.create_timer(self.dt, self.on_timer)
 
-        self.yaw_now =      None          # 현재 yaw(rad)
-        self.yaw_ref =      None          # 정렬 기준 yaw(rad)
-        self.target_yaw =   None       # 회전 목표 yaw(rad)
-        self.front_dist =   None       # 최신 전방 거리(m)
+        self.yaw_now =      None        # 현재 yaw(rad)
+        self.yaw_ref =      None        # 정렬 기준 yaw(rad)
+        self.target_yaw =   None        # 회전 목표 yaw(rad)
+        self.front_dist =   None        # 최신 전방 거리(m)
         self.hit_count =    0           # 임계 이하 연속 카운트
 
         self.post_end_time =    None    # post-advance 종료 시각
-        self.last_zero_sent =   False  # 0,0 명령 1회 발행 여부
+        self.last_zero_sent =   False   # 0,0 명령 1회 발행 여부
 
         self.get_logger().info('[first_course] Ready. Waiting for /object_detection/sos')
 
@@ -167,7 +167,7 @@ class FirstCourseController(Node):
             # yaw 들어오면 on_timer에서 자동 전이
             self.phase = Phase.IDLE
             return
-        self.yaw_ref = self.yaw_now
+        self.yaw_ref = self.yaw_now             # sos 받기 직전의 값으로 imu가 정면을 인식
         self.phase = Phase.CRUISE
         self.last_zero_sent = False
         self.get_logger().info('============= START:================')

@@ -23,7 +23,7 @@ class FrontDistanceNode(Node):
         # ---------- 파라미터 ----------
         self.base_frame   = self.declare_parameter('base_frame', 'base_link').get_parameter_value().string_value
         self.scan_topic   = self.declare_parameter('scan_topic', '/scan').get_parameter_value().string_value        # 라이다 스캔을 토픽
-        self.front_deg    = float(self.declare_parameter('front_deg', 10.0).get_parameter_value().double_value)     # 정면 반각
+        self.front_deg    = float(self.declare_parameter('front_deg', 10.0).get_parameter_value().double_value)     # 정면 반각(-10~+10 -> 20도)
         self.period_sec   = float(self.declare_parameter('period_sec', 0.10).get_parameter_value().double_value)    # 퍼블리시 주기
         self.out_topic    = self.declare_parameter('front_distance_topic', '/perception/front_distance').get_parameter_value().string_value
         # --------------------------------
@@ -77,7 +77,7 @@ class FrontDistanceNode(Node):
 
         # TF: laser_frame -> base_frame
         try:
-            tf = self.buf.lookup_transform(self.base_frame, self.laser_frame, Time())
+            tf = self.buf.lookup_transform(self.base_frame, self.laser_frame, Time()) # (target_frame, source_frame)
         except Exception:
             # TF가 아직 준비 안됐으면 다음 틱에서 재시도
             return
@@ -88,14 +88,15 @@ class FrontDistanceNode(Node):
         yaw = yaw_from_quat(q.x, q.y, q.z, q.w)
 
         # 레이저좌표 → base_link 좌표 (2D)
-        xl = r * np.cos(ang)
+        xl = r * np.cos(ang)        # 라이다 좌표의 점
         yl = r * np.sin(ang)
         c, s = math.cos(yaw), math.sin(yaw)
-        xb = c*xl - s*yl + tx
+        xb = c*xl - s*yl + tx       # base_link 좌표의 점
         yb = s*xl + c*yl + ty
 
-        d   = np.hypot(xb, yb)
-        phi = np.arctan2(yb, xb)  # base_link 기준 각도
+        # 직교 좌표 -> 극좌표로 변환
+        d   = np.hypot(xb, yb)      # 극좌표로 변환했을 떄의 거리(직사각형 빗변의 거리를 구하는 공식)
+        phi = np.arctan2(yb, xb)    # base_link 기준 각도
 
         # 정면 섹터 선택
         fd = math.radians(self.front_deg)
