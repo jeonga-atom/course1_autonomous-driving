@@ -18,6 +18,7 @@ CRUISE_SPPED        =   0.25          # 차체의 속도 [m/s]
 POST_ADVANCE_SEC    =   3.0           # 회전 후 전진 시간 [s]
 RIGHT_TURN_DEG      =   90.0          # 우회전 각도 [deg]
 YAW_KP              =   1.2           # 보정 민감도
+# =================================
 
 # ------------------ 유틸 ------------------ #
 def clamp(x, lo, hi):
@@ -85,22 +86,22 @@ class FirstCourseController(Node):
         self.declare_parameter('topic_cmd_vel',     '/cmd_vel')
 
         # 주행/회전 파라미터
-        self.declare_parameter('cruise_speed',          CRUISE_SPPED)  # m/s
-        self.declare_parameter('yaw_kp',                YAW_KP)              # 직진 중 yaw P이득 (rad/s per rad)
-        self.declare_parameter('yaw_deadband_deg',      2.0)       # 직진 deadband (deg)
-        self.declare_parameter('yaw_max_rate',          1.2)           # 직진 중 최대 각속도 제한(rad/s)
+        self.declare_parameter('cruise_speed',          CRUISE_SPPED)       # m/s
+        self.declare_parameter('yaw_kp',                YAW_KP)             # 직진 중 yaw P이득 (rad/s per rad)
+        self.declare_parameter('yaw_deadband_deg',      2.0)                # 직진 deadband (deg)
+        self.declare_parameter('yaw_max_rate',          1.2)                # 직진 중 최대 각속도 제한(rad/s)
 
-        self.declare_parameter('front_threshold_m',     4.2)      # 회전 트리거 거리(m)
-        self.declare_parameter('front_hysteresis_m',    0.1)     # 채터링 방지 히스테리시스
-        self.declare_parameter('consecutive_hits',      2)         # 임계 이하 연속 감지 횟수
+        self.declare_parameter('front_threshold_m',     4.2)                # 회전 트리거 거리(m)
+        self.declare_parameter('front_hysteresis_m',    0.1)                # 채터링 방지 히스테리시스
+        self.declare_parameter('consecutive_hits',      2)                  # 임계 이하 연속 감지 횟수
 
         self.declare_parameter('turn_kp',               2.0)                # 회전 중 yaw P이득
-        self.declare_parameter('turn_max_rate',         1.5)          # 회전 중 최대 각속도(rad/s)
-        self.declare_parameter('turn_tol_deg',          2.0)           # 회전 완료 오차(deg)
-        self.declare_parameter('right_turn_deg',        RIGHT_TURN_DEG)        # 우회전 각도(+는 좌, -는 우; 아래에서 -로 씀)
+        self.declare_parameter('turn_max_rate',         1.5)                # 회전 중 최대 각속도(rad/s)
+        self.declare_parameter('turn_tol_deg',          2.0)                # 회전 완료 오차(deg)
+        self.declare_parameter('right_turn_deg',        RIGHT_TURN_DEG)     # 우회전 각도(+는 좌, -는 우; 아래에서 -로 씀)
 
-        self.declare_parameter('post_advance_sec',      POST_ADVANCE_SEC)       # 회전 후 전진 시간(s)
-        self.declare_parameter('control_rate_hz',       20.0)       # 제어 주기(Hz)
+        self.declare_parameter('post_advance_sec',      POST_ADVANCE_SEC)   # 회전 후 전진 시간(s)
+        self.declare_parameter('control_rate_hz',       20.0)               # 제어 주기(Hz)
 
         # IMU 방향성 보정 (센서 축 정의가 다를 경우)
         self.declare_parameter('invert_yaw_sign',       False)
