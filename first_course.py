@@ -15,18 +15,17 @@ from std_msgs.msg import Empty, Float32, String
 
 
 # ======= 수정 가능한 기본 값 ========
-CRUISE_SPEED        =   0.4           # 차체의 속도 [m/s]
-EVADE_SPEED         =   0.4           # 벽에 가까워서 튈 때 선속도 (CRUISE_SPEED와 같게하기)
-
+CRUISE_SPEED        =   0.25          # 차체의 속도 [m/s]
 POST_ADVANCE_SEC    =   3.0           # 회전 후 전진 시간 [s]
 RIGHT_TURN_DEG      =   90.0          # 우회전 각도 [deg]
 YAW_KP              =   1.2           # 보정 민감도
 FRONT_THRESHOLD_M   =   0.5           # 전방 임계 거리 [m]
 TURN_MAX_RATE       =   1.5           # 회전 중 최대 각속도 [rad/s]
-FRONT_IGNORE_SEC    =   60.0          # 시작 후 전방 거리 무시 시간(초), 시간 = 거리/속력 대회장에서 약 19초 일듯?
+FRONT_IGNORE_SEC    =   10.0           # 시작 후 전방 거리 무시 시간(초), 시간 = 거리/속력 대회장에서 약 19초 일듯?
 
-SIDE_THRESHOLD      =   0.40          # [m] 벽 임계 거리
-EVADE_TIME          =   0.5           # 튀는 시간 [s] 
+SIDE_THRESHOLD      =   0.40      # [m] 임계 거리 (10cm)
+EVADE_SPEED         =  0.3       # 튈 때 선속도 (최대한 CRUISE_SPEED과 같게하기)
+EVADE_TIME          =   0.5       # 튀는 시간 [s] 
 # =================================
 
 # ------------------ 유틸 ------------------ #
@@ -113,9 +112,11 @@ class FirstCourseController(Node):
         self.declare_parameter('control_rate_hz',       20.0)               # 제어 주기(Hz)
         self.declare_parameter('front_ignore_sec',      FRONT_IGNORE_SEC)   # 시작 후 전방 거리 무시 시간(초)
 
-        self.declare_parameter('invert_yaw_sign',       False) # IMU 방향성 보정 (센서 축 정의가 다를 경우)
+        # IMU 방향성 보정 (센서 축 정의가 다를 경우)
+        self.declare_parameter('invert_yaw_sign',       False)
 
-        self.declare_parameter('suppress_zero_cmd',     True) # 3초 주행 끝난 후 0,0 명령 한번만 보내기 (네트워크 절약용)
+        # 0,0 명령 억제(네트워크 절약용). 정지 전환 시 1회만 0을 발행하고 이후 억제.
+        self.declare_parameter('suppress_zero_cmd',     True)
 
         self.side_threshold     = SIDE_THRESHOLD 
         self.evade_speed        = EVADE_SPEED
@@ -241,16 +242,14 @@ class FirstCourseController(Node):
                     lin = self.evade_speed
                 else:
                     # 벽 감시
-                    if (self.evade_end is None or now >= self.evade_end) and \
-                        (self.left_dist is not None and self.left_dist < self.side_threshold):
-                        ang = -1.0   # 오른쪽으로 회전   1rad = 57.3deg
+                    if self.left_dist is not None and self.left_dist < self.side_threshold:
+                        ang = -2.0   # 오른쪽으로 회전   1->2
                         lin = self.evade_speed
                         self.evade_end = now + Duration(seconds=self.evade_time)
                         self.get_logger().info(f'왼쪽 벽이 매우 가까워!! ({self.left_dist:.2f} m) → 오른쪽으로 피하기')
 
-                    elif (self.evade_end is None or now >= self.evade_end) and \
-                        (self.right_dist is not None and self.right_dist < self.side_threshold):
-                        ang = +1.0   # 왼쪽으로 회전
+                    elif self.right_dist is not None and self.right_dist < self.side_threshold:
+                        ang = +2.0   # 왼쪽으로 회전
                         lin = self.evade_speed
                         self.evade_end = now + Duration(seconds=self.evade_time)
                         self.get_logger().info(f'오른쪽 벽이 매우 가까워!! ({self.left_dist:.2f} m) → 왼쪽으로 피하기')
