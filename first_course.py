@@ -15,17 +15,13 @@ from std_msgs.msg import Empty, Float32, String
 
 
 # ======= 수정 가능한 기본 값 ========
-CRUISE_SPEED        =   0.25          # 차체의 속도 [m/s]
+CRUISE_SPPED        =   0.25          # 차체의 속도 [m/s]
 POST_ADVANCE_SEC    =   3.0           # 회전 후 전진 시간 [s]
 RIGHT_TURN_DEG      =   90.0          # 우회전 각도 [deg]
 YAW_KP              =   1.2           # 보정 민감도
 FRONT_THRESHOLD_M   =   0.5           # 전방 임계 거리 [m]
 TURN_MAX_RATE       =   1.5           # 회전 중 최대 각속도 [rad/s]
-FRONT_IGNORE_SEC    =   10.0           # 시작 후 전방 거리 무시 시간(초), 시간 = 거리/속력 대회장에서 약 19초 일듯?
-
-SIDE_THRESHOLD      =   0.40      # [m] 임계 거리 (10cm)
-EVADE_SPEED         =  0.3       # 튈 때 선속도 (최대한 CRUISE_SPEED과 같게하기)
-EVADE_TIME          =   0.5       # 튀는 시간 [s] 
+FRONT_IGNORE_SEC    =   5.0           # 시작 후 전방 거리 무시 시간(초), 시간 = 거리/속력 대회장에서 약 19초 일듯?
 # =================================
 
 # ------------------ 유틸 ------------------ #
@@ -94,7 +90,7 @@ class FirstCourseController(Node):
         self.declare_parameter('topic_cmd_vel',     '/cmd_vel')
 
         # 주행/회전 파라미터
-        self.declare_parameter('cruise_speed',          CRUISE_SPEED)       # m/s
+        self.declare_parameter('cruise_speed',          CRUISE_SPPED)       # m/s
         self.declare_parameter('yaw_kp',                YAW_KP)             # 직진 중 yaw P이득 (rad/s per rad)
         self.declare_parameter('yaw_deadband_deg',      2.0)                # 직진 deadband (deg)
         self.declare_parameter('yaw_max_rate',          1.2)                # 직진 중 최대 각속도 제한(rad/s)
@@ -112,15 +108,12 @@ class FirstCourseController(Node):
         self.declare_parameter('control_rate_hz',       20.0)               # 제어 주기(Hz)
         self.declare_parameter('front_ignore_sec',      FRONT_IGNORE_SEC)   # 시작 후 전방 거리 무시 시간(초)
 
+
         # IMU 방향성 보정 (센서 축 정의가 다를 경우)
         self.declare_parameter('invert_yaw_sign',       False)
 
         # 0,0 명령 억제(네트워크 절약용). 정지 전환 시 1회만 0을 발행하고 이후 억제.
         self.declare_parameter('suppress_zero_cmd',     True)
-
-        self.side_threshold     = SIDE_THRESHOLD 
-        self.evade_speed        = EVADE_SPEED
-        self.evade_time         = EVADE_TIME
 
         # -------- 파라미터 로드 -------- #
         p = self.get_parameter
@@ -150,9 +143,7 @@ class FirstCourseController(Node):
         self.suppress_zero_cmd = bool(p('suppress_zero_cmd').value)
         
         self.front_ignore_sec = float(p('front_ignore_sec').value)
-        self.left_dist  = None
-        self.right_dist = None
-        self.evade_end  = None
+
 
         # -------- 내부 상태 -------- #
         self.phase = Phase.IDLE
@@ -163,9 +154,6 @@ class FirstCourseController(Node):
         self.sub_sos = self.create_subscription(Empty, self.topic_sos, self.cb_sos, 10)
         self.sub_imu = self.create_subscription(Imu, self.topic_imu, self.cb_imu, qos_profile_sensor_data)
         self.sub_front = self.create_subscription(Float32, self.topic_front_dist, self.cb_front_dist, qos_profile_sensor_data)
-        self.sub_left  = self.create_subscription(Float32, '/perception/left_distance', self.cb_left_dist, qos_profile_sensor_data)
-        self.sub_right = self.create_subscription(Float32, '/perception/right_distance', self.cb_right_dist, qos_profile_sensor_data)
-
 
         self.timer = self.create_timer(self.dt, self.on_timer)
 
@@ -211,10 +199,6 @@ class FirstCourseController(Node):
 
     def cb_front_dist(self, msg: Float32):
         self.front_dist = float(msg.data)
-    def cb_left_dist(self, msg: Float32):
-        self.left_dist = float(msg.data)
-    def cb_right_dist(self, msg: Float32):
-        self.right_dist = float(msg.data)
 
     # ----------- 상태 머신 주기 처리 ----------- #
     def on_timer(self):
@@ -237,31 +221,33 @@ class FirstCourseController(Node):
             # 무시 타이머가 살아있으면 전방거리 체크 스킵
             now = self.get_clock().now()
             if self.front_ignore_until is not None and now < self.front_ignore_until:
-                if self.evade_end is not None and now < self.evade_end:
-                # 튀는 중
-                    lin = self.evade_speed
-                else:
-                    # 벽 감시
-                    if self.left_dist is not None and self.left_dist < self.side_threshold:
-                        ang = -2.0   # 오른쪽으로 회전   1->2
-                        lin = self.evade_speed
-                        self.evade_end = now + Duration(seconds=self.evade_time)
-                        self.get_logger().info(f'왼쪽 벽이 매우 가까워!! ({self.left_dist:.2f} m) → 오른쪽으로 피하기')
-
-                    elif self.right_dist is not None and self.right_dist < self.side_threshold:
-                        ang = +2.0   # 왼쪽으로 회전
-                        lin = self.evade_speed
-                        self.evade_end = now + Duration(seconds=self.evade_time)
-                        self.get_logger().info(f'오른쪽 벽이 매우 가까워!! ({self.left_dist:.2f} m) → 왼쪽으로 피하기')
-
+                # 필요하면 남은 시간 디버그 출력(스팸 방지 위해 간헐적으로만 권장)
+                # rem = (self.front_ignore_until - now).nanoseconds / 1e9
+                # self.get_logger().debug(f'front_distance 무시 중... {rem:.1f}s 남음')
+                self.publish_cmd(lin, ang)
+                return
             else:
+                # 타이머 만료 후에는 None으로 정리(선택)
                 if self.front_ignore_until is not None:
                     self.front_ignore_until = None
-                    self.get_logger().info('front_distance 활성화 → 사이드 감시 OFF')
+                    self.get_logger().info('front_distance 무시 기간 종료 → 전방 감지 활성화')
 
-                if self.front_dist is not None and self.front_dist <= self.front_threshold:
+            # 전방거리 체크(연속 카운트로 채터 방지)
+            if self.front_dist is not None:
+                if self.front_dist <= self.front_threshold:
+                    self.hit_count += 1
+                elif self.front_dist >= self.front_threshold + self.front_hyst:
+                    self.hit_count = 0
+
+                if self.hit_count >= self.consecutive_hits_req:
+                    # 우회전 목표 yaw 설정: 현재 yaw 기준 -90°
                     self.target_yaw = wrap_pi(self.yaw_now + self.right_turn_rad)
                     self.phase = Phase.TURNING_RIGHT
+                    self.hit_count = 0
+                    self.get_logger().info(
+                        f'전방 {self.front_dist:.2f} m 감지 → 회전, 목표 yaw={math.degrees(self.target_yaw):.1f}°)'
+                    )
+                    # 회전 진입 시 즉시 정지(선속도 0 한번 보내줌)
                     self.publish_cmd(0.0, 0.0, force=True)
                     return
 
@@ -318,10 +304,9 @@ class FirstCourseController(Node):
         if not force and self.suppress_zero_cmd and lin == 0.0 and ang == 0.0:
             # 0명령 억제
             return
-        msg             = Twist()
-        msg.linear.x    = float(lin)
-        msg.angular.z   = float(ang)
-
+        msg = Twist()
+        msg.linear.x = float(lin)
+        msg.angular.z = float(ang)
         self.cmd_pub.publish(msg)
         if lin == 0.0 and ang == 0.0:
             self.last_zero_sent = True
@@ -334,6 +319,7 @@ class FirstCourseController(Node):
                 self.publish_cmd(0.0, 0.0, force=True)
         else:
             self.publish_cmd(0.0, 0.0, force=True)
+
 
 def main():
     rclpy.init()
@@ -348,6 +334,7 @@ def main():
             pass
         node.destroy_node()
         rclpy.shutdown()
+
 
 if __name__ == '__main__':
     main()
