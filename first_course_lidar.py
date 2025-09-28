@@ -25,32 +25,29 @@ from geometry_msgs.msg import Twist
 # =============== 수정 가능한 기본 값 =================
 LINE_SPEED_CALL                 = 0.25      # [m/s] 기본 전진 속도
 
-ALIGN_DURATION_SEC              = 20.0      # 좌/우 정렬 유지 시간 [s] -> 이후에는 front만 구독
-FRONT_TURN_TRIGGER              = 1.0       # front 벽 임계값 [m]
+ALIGN_DURATION_SEC              = 30.0      # 좌/우 정렬 유지 시간 [s] -> 이후에는 front만 구독
+FRONT_TURN_TRIGGER              = 0.4       # front 벽 임계값 [m]
 TURN_SPEED                      = 0.7       # 회전 각속도 [rad/s]
 DEG_TOLERANCE                   = 2.0       # 허용 오차 [deg]
 FRONT_REARM_DIST                = 1.20      # 회전 끝난 뒤, front가 이 거리 이상 멀어져야 재트리거 허용
 TURN_COOLDOWN_SEC               = 2.0       # 회전 종료 후 쿨다운 시간 [s]
 
-THR_NEAR_CALL                   = 0.7       # [m] 옆 벽 임계값 → 약하게 반대편으로 / 대회에서는 0.8정도..?
-THR_VERY_NEAR_CALL              = 0.5       # [m] 더 가까울 때 옆 벽 임계값 → 강하게 반대편으로/ 대회에서는 0.5정도..?
-YAW_GENTLE_CALL                 = 0.25      # [rad/s] 약한 회전 (0.25 rad/s -> 약 14.3°/s)
-YAW_STRONG_CALL                 = 0.60      # [rad/s] 강한 회전 (0.60 rad/s -> 약 34.4°/s)
+THR_NEAR_CALL                   = 0.38       # [m] 옆 벽 임계값 → 약하게 반대편으로 / 대회에서는 0.5~0.55정도
+THR_VERY_NEAR_CALL              = 0.30       # [m] 더 가까울 때 옆 벽 임계값 → 강하게 반대편으로/ 대회에서는 0.35~0.40 정도
+YAW_GENTLE_CALL                 = 0.25      # [rad/s] 약한 회전 (0.25 rad/s -> 약 14.3°/s)/ 대회에서 0.25로 사용해도 될듯?
+YAW_STRONG_CALL                 = 0.35      # [rad/s] 강한 회전 (0.60 rad/s -> 약 34.4°/s)/ 대회에서는 0.50~0.60 정도
 
 CTRL_HZ_CALL                    = 10.0      # [Hz] 기본 값 10hz
 DRIVE_OUT_SEC_CALL              = 5.0       # 회전 완료 후 전진 유지 시간(초)
 
 # -------------- 유틸 함수: 쿼터니언→Yaw, 각도 정규화 ------------------
-def yaw_from_quat(x, y, z, w) -> float:
-    """쿼터니언 → Z-Yaw(rad)"""
+def yaw_from_quat(x, y, z, w) -> float: # 쿼터니언 → Z-Yaw(rad)
     return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
 
-def normalize_angle(angle: float) -> float:
-    """임의의 라디안 각도를 [-pi, pi]로 정규화"""
+def normalize_angle(angle: float) -> float: # 임의의 라디안 각도를 [-pi, pi]로 정규화
     return (angle + math.pi) % (2.0 * math.pi) - math.pi
 
-def shortest_angular_distance(from_ang: float, to_ang: float) -> float:
-    """from → to 최단 각(rad, [-pi, pi])"""
+def shortest_angular_distance(from_ang: float, to_ang: float) -> float: # from → to 최단 각(rad, [-pi, pi])
     return normalize_angle(to_ang - from_ang)
 
 
@@ -194,12 +191,16 @@ class CorridorNavigator(Node):
         #  - 오른쪽이 너무 가까우면(=오른벽에 붙음) → 왼쪽으로 회전(반시계, angular.z 양수)
         if L is not None and L <= self.THR_VERY_NEAR:
             ang = -self.YAW_STRONG                  # 시계 방향으로 회전
+            self.get_logger().info("왼쪽에 많이 붙음 → 오른쪽으로 많이 회전")
         elif R is not None and R <= self.THR_VERY_NEAR:
             ang = +self.YAW_STRONG                  # 반시계 방향으로 회전
+            self.get_logger().info("오른쪽에 많이 붙음 → 왼쪽으로 많이 회전")
         elif L is not None and L <= self.THR_NEAR:
             ang = -self.YAW_GENTLE
+            self.get_logger().info("왼쪽에 붙음 → 오른쪽으로 약하게 회전")
         elif R is not None and R <= self.THR_NEAR:
             ang = +self.YAW_GENTLE
+            self.get_logger().info("오른쪽에 붙음 → 왼쪽으로 약하게 회전")
         else:
             ang = 0.0       # 중앙에 가까움 → 직진
 
@@ -285,9 +286,15 @@ class CorridorNavigator(Node):
         err = shortest_angular_distance(self.current_yaw, self.turn_target_yaw)
         err_deg = abs(math.degrees(err))
 
+        # 1) 허용오차 이내면 종료
         if err_deg <= self.DEG_TOL:
             self._finish_turn_right()
-            return Twist()  # 정지 후 FRONT 복귀
+            return Twist()  # 정지 후 FRONT/DRIVE_OUT 등
+
+        # 2) 오버슈트(목표를 지나침)인데 아직 허용오차 밖이면 즉시 종료
+        if err > 0 and err_deg > self.DEG_TOL:
+            self._finish_turn_right()
+            return Twist()
 
         tw.angular.z = -abs(self.TURN_SPEED)  # 우회전(음수)
         return tw
