@@ -121,50 +121,39 @@ class FirstCourseController(Node):
         self.topic_imu = p('topic_imu').get_parameter_value().string_value
         self.topic_front_dist = p('topic_front_dist').get_parameter_value().string_value
         self.topic_cmd_vel = p('topic_cmd_vel').get_parameter_value().string_value
-
         self.cruise_speed = float(p('cruise_speed').value)
         self.yaw_kp = float(p('yaw_kp').value)
         self.yaw_deadband = math.radians(float(p('yaw_deadband_deg').value))
         self.yaw_max_rate = float(p('yaw_max_rate').value)
-
         self.front_threshold = float(p('front_threshold_m').value)
         self.front_hyst = float(p('front_hysteresis_m').value)
         self.consecutive_hits_req = int(p('consecutive_hits').value)
-
         self.turn_kp = float(p('turn_kp').value)
         self.turn_max_rate = float(p('turn_max_rate').value)
         self.turn_tol = math.radians(float(p('turn_tol_deg').value))
         self.right_turn_rad = -math.radians(float(p('right_turn_deg').value))  # 우회전은 -부호
-
         self.post_advance_sec = float(p('post_advance_sec').value)
         self.dt = 1.0 / float(p('control_rate_hz').value)
-
         self.invert_yaw_sign = bool(p('invert_yaw_sign').value)
         self.suppress_zero_cmd = bool(p('suppress_zero_cmd').value)
-        
         self.front_ignore_sec = float(p('front_ignore_sec').value)
 
         # -------- 내부 상태 -------- #
-        self.phase = Phase.IDLE
-        self.state_pub = self.create_publisher(String, '/first_course/state', 10)
-
-        self.cmd_pub = self.create_publisher(Twist, self.topic_cmd_vel, 10)
-
-        self.sub_sos = self.create_subscription(Empty, self.topic_sos, self.cb_sos, 10)
-        self.sub_imu = self.create_subscription(Imu, self.topic_imu, self.cb_imu, qos_profile_sensor_data)
-        self.sub_front = self.create_subscription(Float32, self.topic_front_dist, self.cb_front_dist, qos_profile_sensor_data)
-
-        self.timer = self.create_timer(self.dt, self.on_timer)
+        self.phase      = Phase.IDLE
+        self.state_pub  = self.create_publisher(String, '/first_course/state', 10)
+        self.cmd_pub    = self.create_publisher(Twist, self.topic_cmd_vel, 10)
+        self.sub_sos    = self.create_subscription(Empty, self.topic_sos, self.cb_sos, 10)
+        self.sub_imu    = self.create_subscription(Imu, self.topic_imu, self.cb_imu, qos_profile_sensor_data)
+        self.sub_front  = self.create_subscription(Float32, self.topic_front_dist, self.cb_front_dist, qos_profile_sensor_data)
+        self.timer      = self.create_timer(self.dt, self.on_timer)
 
         self.yaw_now            = None        # 현재 yaw(rad)
         self.yaw_ref            = None        # 정렬 기준 yaw(rad)
         self.target_yaw         = None        # 회전 목표 yaw(rad)
         self.front_dist         = None        # 최신 전방 거리(m)
         self.hit_count          = 0           # 임계 이하 연속 카운트
-
         self.post_end_time      = None        # post-advance 종료 시각
         self.last_zero_sent     = False       # 0,0 명령 1회 발행 여부
-
         self.front_ignore_until = None        # SOS 이후 front_distance 무시 종료 시각
 
         self.get_logger().info('[first_course] Ready. Waiting for /object_detection/sos')
