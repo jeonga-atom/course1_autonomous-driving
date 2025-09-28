@@ -11,6 +11,8 @@ corridor_navigator.py
     * 좌/우 중 하나가 0.2m 이하 → 반대편으로 '강하게' 회전
 - 기본 전진 속도로 복도를 진행 (회전은 angular.z로 보정)
 - 복도 폭 가정: 2.0 m, 차체 폭 0.7 m → 이론적 중앙에서 좌/우 약 0.65 m (참고값)
+
+- ALIGN → FRONT → TURN_RIGHT → DRIVE_OUT → DONE 로 동작함
 """
 import math
 import rclpy
@@ -19,6 +21,24 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Imu
 from std_msgs.msg import Float32, Empty
 from geometry_msgs.msg import Twist
+
+# =============== 수정 가능한 기본 값 =================
+LINE_SPEED_CALL                 = 0.25      # [m/s] 기본 전진 속도
+
+ALIGN_DURATION_SEC              = 20.0      # 좌/우 정렬 유지 시간 [s] -> 이후에는 front만 구독
+FRONT_TURN_TRIGGER              = 1.0       # front 벽 임계값 [m]
+TURN_SPEED                      = 0.7       # 회전 각속도 [rad/s]
+DEG_TOLERANCE                   = 2.0       # 허용 오차 [deg]
+FRONT_REARM_DIST                = 1.20      # 회전 끝난 뒤, front가 이 거리 이상 멀어져야 재트리거 허용
+TURN_COOLDOWN_SEC               = 2.0       # 회전 종료 후 쿨다운 시간 [s]
+
+THR_NEAR_CALL                   = 0.7       # [m] 옆 벽 임계값 → 약하게 반대편으로 / 대회에서는 0.8정도..?
+THR_VERY_NEAR_CALL              = 0.5       # [m] 더 가까울 때 옆 벽 임계값 → 강하게 반대편으로/ 대회에서는 0.5정도..?
+YAW_GENTLE_CALL                 = 0.25      # [rad/s] 약한 회전 (0.25 rad/s -> 약 14.3°/s)
+YAW_STRONG_CALL                 = 0.60      # [rad/s] 강한 회전 (0.60 rad/s -> 약 34.4°/s)
+
+CTRL_HZ_CALL                    = 10.0      # [Hz] 기본 값 10hz
+DRIVE_OUT_SEC_CALL              = 5.0       # 회전 완료 후 전진 유지 시간(초)
 
 # -------------- 유틸 함수: 쿼터니언→Yaw, 각도 정규화 ------------------
 def yaw_from_quat(x, y, z, w) -> float:
@@ -40,17 +60,17 @@ class CorridorNavigator(Node):
 
         # ------------------- 튜닝 가능한 기본 파라미터 ----------------------
         # 정렬 유지 시간(초) - 런타임에서 ros2 param으로 바꾸고 싶으면 declare_parameter 사용
-        self.declare_parameter('align_duration_sec', 20.0)   
-        self.declare_parameter('front_turn_trigger', 1.0)   
-        self.declare_parameter('turn_speed',         0.7)            
-        self.declare_parameter('deg_tolerance',      2.0)        
-        self.declare_parameter('line_speed',         0.25)
-        self.declare_parameter('yaw_gentle',         0.25)
-        self.declare_parameter('yaw_strong',         0.60)
-        self.declare_parameter('thr_near',           0.7)
-        self.declare_parameter('thr_very_near',      0.5)
-        self.declare_parameter('ctrl_hz',            10.0)
-        self.declare_parameter('drive_out_sec',      5.0)
+        self.declare_parameter('align_duration_sec', ALIGN_DURATION_SEC)   
+        self.declare_parameter('front_turn_trigger', FRONT_TURN_TRIGGER)   
+        self.declare_parameter('turn_speed',         TURN_SPEED)            
+        self.declare_parameter('deg_tolerance',      DEG_TOLERANCE)        
+        self.declare_parameter('line_speed',         LINE_SPEED_CALL)
+        self.declare_parameter('yaw_gentle',         YAW_GENTLE_CALL)
+        self.declare_parameter('yaw_strong',         YAW_STRONG_CALL)
+        self.declare_parameter('thr_near',           THR_NEAR_CALL)
+        self.declare_parameter('thr_very_near',      THR_VERY_NEAR_CALL)
+        self.declare_parameter('ctrl_hz',            CTRL_HZ_CALL)
+        self.declare_parameter('drive_out_sec',      DRIVE_OUT_SEC_CALL)
 
         self.align_duration_sec: float  = float(self.get_parameter('align_duration_sec').value)
         self.FRONT_TURN_TRIG            = float(self.get_parameter('front_turn_trigger').value)
@@ -173,9 +193,9 @@ class CorridorNavigator(Node):
         #  - 왼쪽이 너무 가까우면(=왼벽에 붙음) → 오른쪽으로 회전(시계방향, angular.z 음수)
         #  - 오른쪽이 너무 가까우면(=오른벽에 붙음) → 왼쪽으로 회전(반시계, angular.z 양수)
         if L is not None and L <= self.THR_VERY_NEAR:
-            ang = -self.YAW_STRONG
+            ang = -self.YAW_STRONG                  # 시계 방향으로 회전
         elif R is not None and R <= self.THR_VERY_NEAR:
-            ang = +self.YAW_STRONG
+            ang = +self.YAW_STRONG                  # 반시계 방향으로 회전
         elif L is not None and L <= self.THR_NEAR:
             ang = -self.YAW_GENTLE
         elif R is not None and R <= self.THR_NEAR:
@@ -203,7 +223,7 @@ class CorridorNavigator(Node):
     # ------------------ FRONT 다음 단계: 회전 후 5초 전진 ---------------------
     def _compute_twist_drive_out(self, now) -> Twist:
         """
-        회전 완료 후 5초간 직진 → 그 다음 DONE 상태로 전환하여 종료
+        회전 완료 후 "drive_out_sec"초 동안 직진 → 그 다음 DONE 상태로 전환하여 종료
         """
         tw = Twist()
         # 안전: 시작 시각이 없으면 바로 종료
