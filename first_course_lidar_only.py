@@ -45,14 +45,19 @@ class CorridorNavigator(Node):
         # ===================== 튜닝 가능한 기본 파라미터 =====================
         # 정렬 유지 시간(초) - 런타임에서 ros2 param으로 바꾸고 싶으면 declare_parameter 사용
         self.declare_parameter('align_duration_sec', 20.0)   # 좌/우 정렬 유지 시간 (초) -> 이후에는 front만 구독
-        self.declare_parameter('front_turn_trigger', 0.40)   # front 임계값 (m)
+        self.declare_parameter('front_turn_trigger', 1.0)   # front 임계값 (m)
         self.declare_parameter('turn_speed', 0.7)            # 회전 각속도 (rad/s)
         self.declare_parameter('deg_tolerance', 2.0)         # 허용 오차 (deg)
+        self.declare_parameter('front_rearm_dist', 1.20)     # 회전 끝난 뒤, 이 거리 이상 멀어져야 재트리거 허용
+        self.declare_parameter('turn_cooldown_sec', 2.0)     # 회전 종료 후 쿨다운 시간
         
         self.align_duration_sec: float = float(self.get_parameter('align_duration_sec').value)
         self.FRONT_TURN_TRIG = float(self.get_parameter('front_turn_trigger').value)
         self.TURN_SPEED      = float(self.get_parameter('turn_speed').value)
         self.DEG_TOL         = float(self.get_parameter('deg_tolerance').value)
+        self.FRONT_REARM_DIST = float(self.get_parameter('front_rearm_dist').value)
+        self.TURN_COOLDOWN    = float(self.get_parameter('turn_cooldown_sec').value)
+
 
         # 주행 속도 및 회전량 (필요 시 조정)
         self.LIN_SPEED = 0.25        # [m/s] 기본 전진 속도
@@ -60,8 +65,8 @@ class CorridorNavigator(Node):
         self.YAW_STRONG = 0.60       # [rad/s] 강한 회전
 
         # 임계값 (요청 조건)
-        self.THR_NEAR = 0.5          # [m] 0.5m 이내 → 약하게 반대편
-        self.THR_VERY_NEAR = 0.2     # [m] 0.2m 이내 → 강하게 반대편
+        self.THR_NEAR = 0.7          # [m] 0.5m 이내 → 약하게 반대편
+        self.THR_VERY_NEAR = 0.5     # [m] 0.2m 이내 → 강하게 반대편
 
         # 제어 주기 (컨트롤 루프)
         self.CTRL_HZ = 20.0          # [Hz]
@@ -88,6 +93,10 @@ class CorridorNavigator(Node):
         self.current_yaw        = None      # 최신 imu yaw
         self.turn_target_yaw    = None      # 목표 yaw (90도 우회전 후)
         self.started            = False
+        self.turned_once = False          # 이미 한 번 회전했는지
+        self.drive_out_sec = 5.0          # 회전 완료 후 전진 유지 시간(초)
+        self.drive_out_start = None       # 전진 시작 시각
+        self.last_turn_end_time = None 
 
         # ===================== 상태 관리 =====================
         # 상태 A: 'ALIGN' (좌/우만) → align_duration_sec 초 유지 후
@@ -133,15 +142,22 @@ class CorridorNavigator(Node):
         if self.state == 'ALIGN' and (now - self.start_t) >= self.align_duration_sec:
             self._switch_to_front_only()
 
-        if self.state == 'FRONT':
+        # [교체] FRONT에서 한 번만 트리거: front ≤ 임계 → 회전 시작(IMU)
+        if self.state == 'FRONT' and (not self.turned_once):
             if (self.front_dist is not None) and (self.front_dist <= self.FRONT_TURN_TRIG):
-                self._start_turn_right()   # IMU 기반 회전 시작
+                self._start_turn_right()
 
+        # [추가] DONE 상태면 더 이상 아무 것도 하지 않음(퍼블리시 X)
+        if self.state == 'DONE':
+            return
+        
         # ----- 상태별 제어 -----
         if self.state == 'ALIGN':
             twist = self._compute_twist_align()
         elif self.state == 'TURN_RIGHT':  # [추가] 회전 상태 분기
             twist = self._compute_twist_turn_right()
+        elif self.state == 'DRIVE_OUT':                 # [추가] 회전 후 5초 전진
+            twist = self._compute_twist_drive_out()
         else:  # self.state == 'FRONT'
             twist = self._compute_twist_front()
 
@@ -192,6 +208,31 @@ class CorridorNavigator(Node):
         tw.linear.x  = self.LIN_SPEED   # 계속 전진
         tw.angular.z = 0.0              # 좌/우는 더 이상 받지 않으므로 회전 보정 없음
         return tw
+    
+    # [추가] FRONT 다음 단계: 회전 후 5초 전진 상태
+    def _compute_twist_drive_out(self) -> Twist:
+        """
+        회전 완료 후 5초간 직진 → 그 다음 DONE 상태로 전환하여 종료
+        """
+        tw = Twist()
+        # 안전: 시작 시각이 없으면 바로 종료
+        if self.drive_out_start is None:
+            self.state = 'DONE'
+            self.get_logger().info("[DRIVE_OUT] 시작 시각 없음 → DONE")
+            return tw  # 정지(0)
+
+        elapsed = time.monotonic() - self.drive_out_start
+        if elapsed >= self.drive_out_sec:
+            # 종료: 이번 틱에는 정지 명령 1회 발행, 다음 루프부터는 control_loop()에서 return
+            self.state = 'DONE'
+            self.get_logger().info("[DRIVE_OUT] 5초 경과 → DONE(주행 종료)")
+            return Twist()  # 정지
+
+        # 5초 동안은 직진 유지
+        tw.linear.x = self.LIN_SPEED
+        tw.angular.z = 0.0
+        return tw
+
     
     # ===================== IMU 기반 90도 우회전 제어 =====================
     def _start_turn_right(self):
@@ -247,9 +288,11 @@ class CorridorNavigator(Node):
     
     # ===================== 회전 완료 후 FRONT 복귀 =====================
     def _finish_turn_right(self):
-        self.state = 'FRONT'
+        self.turned_once = True
+        self.state = 'DRIVE_OUT'
+        self.drive_out_start = time.monotonic()
         self.turn_target_yaw = None
-        self.get_logger().info("[TURN_RIGHT] 완료 → FRONT 복귀")
+        self.get_logger().info("[TURN_RIGHT] 완료 → DRIVE_OUT(5초 전진)")
 
     # ===================== 헬퍼 =====================
     @staticmethod
