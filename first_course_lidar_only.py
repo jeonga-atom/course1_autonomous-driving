@@ -20,8 +20,22 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 
-from std_msgs.msg import Float32
+from sensor_msgs.msg import Imu
+from std_msgs.msg import Float32, Empty
 from geometry_msgs.msg import Twist
+
+# ================ 유틸 함수: 쿼터니언→Yaw, 각도 정규화 =====================
+def yaw_from_quat(x, y, z, w) -> float:
+    """쿼터니언 → Z-Yaw(rad)"""
+    return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+def normalize_angle(angle: float) -> float:
+    """임의의 라디안 각도를 [-pi, pi]로 정규화"""
+    return (angle + math.pi) % (2.0 * math.pi) - math.pi
+
+def shortest_angular_distance(from_ang: float, to_ang: float) -> float:
+    """from → to 최단 각(rad, [-pi, pi])"""
+    return normalize_angle(to_ang - from_ang)
 
 
 class CorridorNavigator(Node):
@@ -30,8 +44,15 @@ class CorridorNavigator(Node):
 
         # ===================== 튜닝 가능한 기본 파라미터 =====================
         # 정렬 유지 시간(초) - 런타임에서 ros2 param으로 바꾸고 싶으면 declare_parameter 사용
-        self.declare_parameter('align_duration_sec', 20.0)
+        self.declare_parameter('align_duration_sec', 20.0)   # 좌/우 정렬 유지 시간 (초) -> 이후에는 front만 구독
+        self.declare_parameter('front_turn_trigger', 0.40)   # front 임계값 (m)
+        self.declare_parameter('turn_speed', 0.7)            # 회전 각속도 (rad/s)
+        self.declare_parameter('deg_tolerance', 2.0)         # 허용 오차 (deg)
+        
         self.align_duration_sec: float = float(self.get_parameter('align_duration_sec').value)
+        self.FRONT_TURN_TRIG = float(self.get_parameter('front_turn_trigger').value)
+        self.TURN_SPEED      = float(self.get_parameter('turn_speed').value)
+        self.DEG_TOL         = float(self.get_parameter('deg_tolerance').value)
 
         # 주행 속도 및 회전량 (필요 시 조정)
         self.LIN_SPEED = 0.25        # [m/s] 기본 전진 속도
@@ -54,18 +75,19 @@ class CorridorNavigator(Node):
 
         # ===================== 구독자(초기 상태: 좌/우만) =====================
         # 초기 20초 동안은 좌/우만 구독해서 가운데 정렬 → front는 아예 구독하지 않음
-        self.sub_left  = self.create_subscription(
-            Float32, '/perception/left_distance',  self.cb_left,  qos_profile_sensor_data
-        )
-        self.sub_right = self.create_subscription(
-            Float32, '/perception/right_distance', self.cb_right, qos_profile_sensor_data
-        )
+        self.sub_left  = self.create_subscription(Float32, '/perception/left_distance',  self.cb_left,  qos_profile_sensor_data)
+        self.sub_right = self.create_subscription(Float32, '/perception/right_distance', self.cb_right, qos_profile_sensor_data)
+        self.sub_imu = self.create_subscription(Imu, '/imu/data', self.cb_imu, qos_profile_sensor_data)
+        self.sub_sos = self.create_subscription(Empty, '/object_detection/sos', self.cb_sos, 10)
         self.sub_front = None  # 20초 후에 생성
 
         # 최신 거리값 저장 변수 (None이면 아직 수신 전/무시)
-        self.left_dist  = None
-        self.right_dist = None
-        self.front_dist = None
+        self.left_dist          = None
+        self.right_dist         = None
+        self.front_dist         = None
+        self.current_yaw        = None      # 최신 imu yaw
+        self.turn_target_yaw    = None      # 목표 yaw (90도 우회전 후)
+        self.started            = False
 
         # ===================== 상태 관리 =====================
         # 상태 A: 'ALIGN' (좌/우만) → align_duration_sec 초 유지 후
@@ -75,13 +97,21 @@ class CorridorNavigator(Node):
 
         self.get_logger().info(
             f"[{self.state}] 시작. 좌/우 라이다로 가운데 정렬 {self.align_duration_sec:.1f}s 유지. "
-            f"이 동안 front는 구독하지 않습니다."
-        )
-
+            f"이 동안 front는 구독하지 않습니다.")
         # 제어 타이머
         self.timer = self.create_timer(self.dt, self.control_loop)
 
     # ===================== 콜백: 거리 수신 =====================
+    def cb_sos(self, msg: Empty):   # SOS 신호를 받으면 주행 시작
+        self.started = True
+        self.state = 'ALIGN'                       # 시작 시 항상 ALIGN로 복귀
+        self.start_t = time.monotonic()            # 여기서 20초 타이머 리셋
+        self.get_logger().info("[START] SOS 신호 수신 → 주행 시작")
+
+    def cb_imu(self, msg: Imu):
+        q = msg.orientation
+        self.current_yaw = yaw_from_quat(q.x, q.y, q.z, q.w)  # 라디안 [-pi, pi]
+
     def cb_left(self, msg: Float32):
         # ALIGN 상태에서만 의미 있음 (FRONT 상태가 되면 구독 자체를 해제)
         self.left_dist = self._sanitize(msg.data)
@@ -97,14 +127,21 @@ class CorridorNavigator(Node):
     # ===================== 제어 루프 =====================
     def control_loop(self):
         now = time.monotonic()
-
+        if not self.started:
+            return
         # ----- 상태 전환: ALIGN → FRONT -----
         if self.state == 'ALIGN' and (now - self.start_t) >= self.align_duration_sec:
             self._switch_to_front_only()
 
+        if self.state == 'FRONT':
+            if (self.front_dist is not None) and (self.front_dist <= self.FRONT_TURN_TRIG):
+                self._start_turn_right()   # IMU 기반 회전 시작
+
         # ----- 상태별 제어 -----
         if self.state == 'ALIGN':
             twist = self._compute_twist_align()
+        elif self.state == 'TURN_RIGHT':  # [추가] 회전 상태 분기
+            twist = self._compute_twist_turn_right()
         else:  # self.state == 'FRONT'
             twist = self._compute_twist_front()
 
@@ -155,6 +192,18 @@ class CorridorNavigator(Node):
         tw.linear.x  = self.LIN_SPEED   # 계속 전진
         tw.angular.z = 0.0              # 좌/우는 더 이상 받지 않으므로 회전 보정 없음
         return tw
+    
+    # ===================== IMU 기반 90도 우회전 제어 =====================
+    def _start_turn_right(self):
+        if self.current_yaw is None:
+            self.get_logger().warn("IMU yaw 없음 → 회전 대기")
+            return
+
+        self.state = 'TURN_RIGHT'
+        start_yaw = self.current_yaw
+        self.turn_target_yaw = normalize_angle(start_yaw - math.radians(90.0))  # 목표 = 현재 - 90°
+        self.get_logger().info(f"TURN 시작: start={math.degrees(start_yaw):.1f}°, "
+                            f"target={math.degrees(self.turn_target_yaw):.1f}°")
 
     # ===================== 상태 전환 유틸 =====================
     def _switch_to_front_only(self):
@@ -178,6 +227,29 @@ class CorridorNavigator(Node):
         self.get_logger().info(
             "[FRONT]로 전환. 이제 front만 구독하고, 좌/우는 더 이상 받지 않습니다."
         )
+
+    # ===================== 회전중 동작 =====================
+    def _compute_twist_turn_right(self) -> Twist:
+        tw = Twist()                    # 기본 0 (전진 X)
+        if self.current_yaw is None or self.turn_target_yaw is None:
+            return tw  # 안전상 정지
+
+        # 현재 yaw와 목표 yaw 차이
+        err = shortest_angular_distance(self.current_yaw, self.turn_target_yaw)
+        err_deg = abs(math.degrees(err))
+
+        if err_deg <= self.DEG_TOL:
+            self._finish_turn_right()
+            return Twist()  # 정지 후 FRONT 복귀
+
+        tw.angular.z = -abs(self.TURN_SPEED)  # 우회전(음수)
+        return tw
+    
+    # ===================== 회전 완료 후 FRONT 복귀 =====================
+    def _finish_turn_right(self):
+        self.state = 'FRONT'
+        self.turn_target_yaw = None
+        self.get_logger().info("[TURN_RIGHT] 완료 → FRONT 복귀")
 
     # ===================== 헬퍼 =====================
     @staticmethod
